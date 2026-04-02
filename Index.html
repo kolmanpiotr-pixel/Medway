@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <link rel="manifest" href="manifest.json">
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Council Tracker - Zarządzanie finansami</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+@keyframes spin-slow { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.animate-spin-slow { animation: spin-slow 3s linear infinite; }
+@keyframes pulse-glow { 0%, 100% { opacity: 0.2; } 50% { opacity: 0.4; } }
+.animate-pulse-glow { animation: pulse-glow 4s ease-in-out infinite; }
+input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; }
+</style>
+</head>
+<body class="bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 min-h-screen text-slate-100">
+<div class="fixed inset-0 overflow-hidden pointer-events-none">
+<div class="absolute -top-40 -right-40 w-80 h-80 bg-purple-500 rounded-full mix-blend-multiply filter blur-3xl opacity-20 animate-pulse-glow"></div>
+<div class="absolute -bottom-40 -left-40 w-80 h-80 bg-blue-500 rounded-full mix-blend-multiply filter blur-3xl opacity-20 animate-pulse-glow" style="animation-delay: 2s;"></div>
+</div>
+
+<div id="app" class="relative max-w-6xl mx-auto p-4 md:p-8"></div>
+
+<!-- Modal edycji -->
+<div id="edit-modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+<div class="bg-slate-800 rounded-3xl p-8 w-full max-w-md border border-white/10 mx-4">
+<h2 class="text-2xl font-bold mb-6">Edytuj wpis</h2>
+<div id="edit-form" class="space-y-6"></div>
+<div class="flex gap-3 mt-8">
+<button onclick="closeEditModal()" class="flex-1 py-3 bg-white/10 hover:bg-white/20 rounded-2xl font-medium transition">Anuluj</button>
+<button onclick="saveEditedEntry()" class="flex-1 py-3 bg-gradient-to-r from-purple-500 to-blue-500 rounded-2xl font-bold transition">Zapisz zmiany</button>
+</div>
+</div>
+</div>
+
+<div id="notification-toast" class="fixed bottom-4 right-4 transform translate-y-20 opacity-0 transition-all duration-500 z-50">
+<div id="notification-content" class="bg-slate-800 border border-white/10 p-4 rounded-2xl shadow-2xl flex items-center gap-3 backdrop-blur-xl">
+<span id="notification-icon">✅</span>
+<p id="notification-text" class="text-sm font-medium"></p>
+</div>
+</div>
+
+<script>
+let state = {
+entries: [],
+currentYearFilter: 'all',
+formData: { date: new Date().toISOString().split('T')[0], category: 'medway', type: 'wplata', amount: '', isCyclic: false },
+editEntryId: null
+};
+
+let chart1 = null, chart2 = null, chart3 = null;
+
+const showNotification = (text, icon = '✅') => {
+const toast = document.getElementById('notification-toast');
+document.getElementById('notification-icon').textContent = icon;
+document.getElementById('notification-text').textContent = text;
+toast.classList.remove('translate-y-20', 'opacity-0');
+setTimeout(() => toast.classList.add('translate-y-20', 'opacity-0'), 3000);
+};
+
+const saveToLocalStorage = () => {
+const originalEntries = state.entries.filter(e => !e.isVirtual).map(({ isVirtual, ...entry }) => entry);
+localStorage.setItem('council_tracker_entries', JSON.stringify(originalEntries));
+};
+
+const loadFromLocalStorage = () => {
+const saved = localStorage.getItem('council_tracker_entries');
+if (saved) {
+try {
+const parsed = JSON.parse(saved);
+state.entries = processEntries(parsed);
+} catch (e) {
+console.error('Błąd wczytywania:', e);
+state.entries = [];
+}
+} else {
+const demoEntries = [
+{ id: '1', date: '2024-01-15', year: 2024, category: 'medway', type: 'wplata', amount: 2500, isCyclic: true, createdAt: Date.now() },
+{ id: '2', date: '2024-02-10', year: 2024, category: 'council', type: 'naliczenie', amount: 450, isCyclic: false, createdAt: Date.now() },
+{ id: '3', date: '2024-03-05', year: 2024, category: 'payroll', type: 'naliczenie', amount: 320, isCyclic: true, createdAt: Date.now() },
+{ id: '4', date: '2024-01-20', year: 2024, category: 'medway', type: 'naliczenie', amount: 120, isCyclic: false, createdAt: Date.now() }
+];
+state.entries = processEntries(demoEntries);
+saveToLocalStorage();
+}
+};
+
+const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2);
+
+const processEntries = (rawEntries) => {
+const processed = [];
+const today = new Date();
+today.setHours(0, 0, 0, 0);
+
+rawEntries.forEach(entry => {
+processed.push({ ...entry, isVirtual: false });
+
+if (entry.isCyclic) {
+let current = new Date(entry.date);
+while (true) {
+current = new Date(current.getFullYear(), current.getMonth() + 1, current.getDate());
+if (current > today) break;
+const dateStr = current.toISOString().split('T')[0];
+const exists = processed.some(e => e.date === dateStr && e.category === entry.category && e.type === entry.type && e.amount === entry.amount && !e.isVirtual);
+if (!exists) {
+processed.push({
+...entry,
+id: entry.id + '-virtual-' + Date.now() + Math.random(),
+date: dateStr,
+year: current.getFullYear(),
+isVirtual: true,
+originalId: entry.id
+});
+}
+}
+}
+});
+return processed;
+};
+
+window.addEntry = () => {
+const { date, category, type, amount, isCyclic } = state.formData;
+if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0 || !date) {
+showNotification("Wypełnij poprawnie kwotę (> 0) i datę", "⚠️");
+return;
+}
+const newEntry = {
+id: generateId(),
+date: date,
+year: new Date(date).getFullYear(),
+category: category,
+type: type,
+amount: parseFloat(amount),
+isCyclic: isCyclic,
+createdAt: Date.now()
+};
+const originals = state.entries.filter(e => !e.isVirtual);
+originals.push(newEntry);
+state.entries = processEntries(originals);
+saveToLocalStorage();
+showNotification(isCyclic ? "Dodano wpis cykliczny 🔄" : "Dodano wpis ✅");
+state.formData.amount = '';
+state.formData.isCyclic = false;
+renderApp();
+};
+
+window.removeEntry = (id, isVirtual) => {
+if (isVirtual) {
+showNotification("Nie można usunąć kopii automatycznej. Usuń wpis źródłowy.", "ℹ️");
+return;
+}
+if (!confirm('Usunąć ten wpis?')) return;
+const originals = state.entries.filter(e => !e.isVirtual && e.id !== id);
+state.entries = processEntries(originals);
+saveToLocalStorage();
+showNotification("Usunięto wpis 🗑️");
+renderApp();
+};
+
+window.setYearFilter = (year) => {
+state.currentYearFilter = year;
+renderApp();
+};
+
+window.handleInputChange = (field, value, isCheckbox = false) => {
+if (isCheckbox) {
+state.formData[field] = value;
+} else if (field === 'amount') {
+state.formData[field] = value;
+} else {
+state.formData[field] = value;
+}
+};
+
+window.startEdit = (id) => {
+const entry = state.entries.find(e => e.id === id && !e.isVirtual);
+if (!entry) return;
+state.editEntryId = id;
+const modal = document.getElementById('edit-modal');
+const formDiv = document.getElementById('edit-form');
+formDiv.innerHTML = `
+<div class="space-y-4">
+<div><label class="text-xs text-purple-300">Data</label><input id="edit-date" type="date" value="${entry.date}" class="w-full bg-white/10 border border-white/10 rounded-xl p-3 text-white"></div>
+<div><label class="text-xs text-purple-300">Kategoria</label>
+<select id="edit-category" class="w-full bg-white/10 border border-white/10 rounded-xl p-3 text-white">
+<option value="medway" ${entry.category==='medway'?'selected':''}>Medway Council</option>
+<option value="council" ${entry.category==='council'?'selected':''}>Płatność Council</option>
+<option value="payroll" ${entry.category==='payroll'?'selected':''}>Pobrane z wypłaty</option>
+</select>
+</div>
+<div><label class="text-xs text-purple-300">Typ</label>
+<select id="edit-type" class="w-full bg-white/10 border border-white/10 rounded-xl p-3 text-white">
+<option value="wplata" ${entry.type==='wplata'?'selected':''}>Wpłata (+)</option>
+<option value="naliczenie" ${entry.type==='naliczenie'?'selected':''}>Naliczenie (-)</option>
+</select>
+</div>
+<div><label class="text-xs text-purple-300">Kwota (£)</label><input id="edit-amount" type="number" step="0.01" value="${entry.amount}" class="w-full bg-white/10 border border-white/10 rounded-xl p-3 text-white"></div>
+<label class="flex items-center gap-3 cursor-pointer"><input id="edit-cyclic" type="checkbox" ${entry.isCyclic?'checked':''} class="w-5 h-5 accent-purple-500"> <span class="text-sm">Powtarzaj co miesiąc (cykliczny)</span></label>
+</div>
+`;
+modal.classList.remove('hidden');
+};
+
+window.closeEditModal = () => {
+document.getElementById('edit-modal').classList.add('hidden');
+state.editEntryId = null;
+};
+
+window.saveEditedEntry = () => {
+if (!state.editEntryId) return;
+const date = document.getElementById('edit-date').value;
+const category = document.getElementById('edit-category').value;
+const type = document.getElementById('edit-type').value;
+const amount = parseFloat(document.getElementById('edit-amount').value);
+const isCyclic = document.getElementById('edit-cyclic').checked;
+
+if (!amount || amount <= 0) {
+showNotification("Nieprawidłowa kwota", "⚠️");
+return;
+}
+
+const originals = state.entries.filter(e => !e.isVirtual);
+const index = originals.findIndex(e => e.id === state.editEntryId);
+if (index !== -1) {
+originals[index] = {
+...originals[index],
+date: date,
+year: new Date(date).getFullYear(),
+category: category,
+type: type,
+amount: amount,
+isCyclic: isCyclic
+};
+}
+state.entries = processEntries(originals);
+saveToLocalStorage();
+closeEditModal();
+showNotification("Zapisano zmiany ✅");
+renderApp();
+};
+
+window.exportToCSV = () => {
+const originals = state.entries.filter(e => !e.isVirtual);
+if (originals.length === 0) {
+showNotification("Brak danych do eksportu", "📭");
+return;
+}
+const headers = ['Data', 'Kategoria', 'Typ', 'Kwota', 'Cykliczny'];
+const rows = originals.map(e => [e.date, e.category === 'medway' ? 'Medway Council' : e.category === 'council' ? 'Płatność Council' : 'Pobrane z wypłaty', e.type === 'wplata' ? 'Wpłata' : 'Naliczenie', e.amount, e.isCyclic ? 'Tak' : 'Nie']);
+const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
+const blob = new Blob(["\uFEFF" + csv], {type: 'text/csv;charset=utf-8;'});
+const link = document.createElement('a');
+link.href = URL.createObjectURL(blob);
+link.download = 'council_tracker_export.csv';
+link.click();
+URL.revokeObjectURL(link.href);
+showNotification("Eksportowano do CSV 📁");
+};
+
+window.resetAllData = () => {
+if (confirm('Usunąć WSZYSTKIE dane? Operacja nieodwracalna!')) {
+localStorage.removeItem('council_tracker_entries');
+state.entries = [];
+state.currentYearFilter = 'all';
+renderApp();
+showNotification("Dane zostały zresetowane 🗑️");
+}
+};
+
+function renderApp() {
+const appDiv = document.getElementById('app');
+
+// Filtrowanie
+const filteredEntries = state.entries
+.filter(e => state.currentYearFilter === 'all' || e.year === parseInt(state.currentYearFilter))
+.sort((a,b) => new Date(b.date) - new Date(a.date));
+
+// Unikalne lata
+const uniqueYears = [...new Set(state.entries.map(e => e.year))].filter(y => y).sort((a,b)=>b-a);
+
+// Obliczenia dla każdej kategorii
+const catMedway = { income: 0, expense: 0, balance: 0, count: 0 };
+const catCouncil = { income: 0, expense: 0, balance: 0, count: 0 };
+const catPayroll = { income: 0, expense: 0, balance: 0, count: 0 };
+
+filteredEntries.forEach(e => {
+const amount = e.amount;
+let cat = null;
+if (e.category === 'medway') cat = catMedway;
+else if (e.category === 'council') cat = catCouncil;
+else cat = catPayroll;
+
+cat.count++;
+if (e.type === 'wplata') {
+cat.income += amount;
+cat.balance += amount;
+} else {
+cat.expense += amount;
+cat.balance -= amount;
+}
+});
+
+const totalBalance = catMedway.balance + catCouncil.balance + catPayroll.balance;
+const totalIncome = catMedway.income + catCouncil.income + catPayroll.income;
+const totalExpense = catMedway.expense + catCouncil.expense + catPayroll.expense;
+
+// Generowanie HTML
+let html = `
+<header class="backdrop-blur-xl bg-white/5 rounded-2xl p-6 mb-8 border border-white/10 shadow-2xl">
+<div class="flex flex-col md:flex-row justify-between items-center gap-6">
+<div class="flex items-center gap-4">
+<div class="p-3 bg-gradient-to-br from-purple-500 to-blue-500 rounded-2xl shadow-lg">
+<svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"></path></svg>
+</div>
+<div>
+<h1 class="text-4xl font-bold bg-gradient-to-r from-purple-400 via-pink-400 to-blue-400 bg-clip-text text-transparent">Council Tracker</h1>
+<p class="text-purple-300/70 text-sm mt-1">💾 Dane lokalnie • Edycja • Wykresy • Kategorie</p>
+</div>
+</div>
+<div class="flex flex-wrap justify-center gap-2 bg-white/5 p-1.5 rounded-xl backdrop-blur-sm">
+<button onclick="setYearFilter('all')" class="px-5 py-2.5 rounded-lg text-sm font-medium transition-all ${state.currentYearFilter === 'all' ? 'bg-gradient-to-r from-purple-500 to-blue-500 text-white shadow-lg' : 'text-purple-300/70 hover:text-white hover:bg-white/10'}">Wszystkie</button>
+${uniqueYears.map(y => `<button onclick="setYearFilter('${y}')" class="px-5 py-2.5 rounded-lg text-sm font-medium transition-all ${state.currentYearFilter == y ? 'bg-gradient-to-r from-purple-500 to-blue-500 text-white shadow-lg' : 'text-purple-300/70 hover:text-white hover:bg-white/10'}">${y}</button>`).join('')}
+</div>
+</div>
+</header>
+
+<!-- Bilans ogólny -->
+<div class="mb-8 grid grid-cols-1 md:grid-cols-3 gap-6">
+<div class="col-span-1 md:col-span-2 backdrop-blur-xl bg-white/5 rounded-3xl p-8 border border-white/10">
+<p class="text-purple-300/70 text-xs uppercase tracking-wider mb-2">Łączny bilans</p>
+<p class="text-5xl font-bold ${totalBalance >= 0 ? 'text-emerald-400' : 'text-rose-400'}">£${Math.abs(totalBalance).toLocaleString('en-GB', {minimumFractionDigits:2})} ${totalBalance >= 0 ? '📈' : '📉'}</p>
+<div class="mt-6 grid grid-cols-2 gap-6 text-sm">
+<div><span class="text-emerald-400">💰 Wpłaty:</span> £${totalIncome.toLocaleString('en-GB',{minimumFractionDigits:2})}</div>
+<div><span class="text-rose-400">📉 Naliczenia:</span> £${totalExpense.toLocaleString('en-GB',{minimumFractionDigits:2})}</div>
+</div>
+</div>
+<div class="backdrop-blur-xl bg-white/5 rounded-3xl p-8 border border-white/10 flex flex-col justify-center">
+<p class="text-purple-300/70 text-xs uppercase tracking-wider">Liczba transakcji</p>
+<p class="text-4xl font-bold mt-2">${filteredEntries.length}</p>
+<p class="text-xs text-purple-300/50 mt-2">${filteredEntries.filter(e => e.isVirtual).length} automatycznych</p>
+</div>
+</div>
+
+<!-- Osobne wyniki dla kategorii -->
+<div class="mb-8">
+<h2 class="text-xl font-bold mb-4 flex items-center gap-2">📊 Podsumowanie kategorii</h2>
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+<!-- Medway Council -->
+<div class="backdrop-blur-xl bg-white/5 rounded-2xl p-6 border border-white/10 hover:border-white/20 transition-all">
+<div class="flex items-center justify-between mb-4">
+<div class="text-3xl">🏛️</div>
+<span class="text-xs font-bold px-2 py-1 rounded-full ${catMedway.balance >= 0 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}">
+${catMedway.balance >= 0 ? 'DODATNI' : 'UJEMNY'}
+</span>
+</div>
+<h3 class="text-lg font-bold text-white mb-3">Medway Council</h3>
+<div class="space-y-2 text-sm">
+<div class="flex justify-between"><span class="text-purple-300/70">Bilans:</span><span class="font-bold ${catMedway.balance >= 0 ? 'text-emerald-400' : 'text-rose-400'}">£${Math.abs(catMedway.balance).toLocaleString('en-GB', {minimumFractionDigits:2})}</span></div>
+<div class="flex justify-between"><span class="text-emerald-400">Wpłaty:</span><span>£${catMedway.income.toLocaleString('en-GB', {minimumFractionDigits:2})}</span></div>
+<div class="flex justify-between"><span class="text-rose-400">Naliczenia:</span><span>£${catMedway.expense.toLocaleString('en-GB', {minimumFractionDigits:2})}</span></div>
+<div class="flex justify-between text-xs text-purple-300/50 pt-2 border-t border-white/10"><span>Liczba wpisów:</span><span>${catMedway.count}</span></div>
+</div>
+</div>
+
+<!-- Płatność Council -->
+<div class="backdrop-blur-xl bg-white/5 rounded-2xl p-6 border border-white/10 hover:border-white/20 transition-all">
+<div class="flex items-center justify-between mb-4">
+<div class="text-3xl">👥</div>
+<span class="text-xs font-bold px-2 py-1 rounded-full ${catCouncil.balance >= 0 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}">
+${catCouncil.balance >= 0 ? 'DODATNI' : 'UJEMNY'}
+</span>
+</div>
+<h3 class="text-lg font-bold text-white mb-3">Płatność Council</h3>
+<div class="space-y-2 text-sm">
+<div class="flex justify-between"><span class="text-purple-300/70">Bilans:</span><span class="font-bold ${catCouncil.balance >= 0 ? 'text-emerald-400' : 'text-rose-400'}">£${Math.abs(catCouncil.balance).toLocaleString('en-GB', {minimumFractionDigits:2})}</span></div>
+<div class="flex justify-between"><span class="text-emerald-400">Wpłaty:</span><span>£${catCouncil.income.toLocaleString('en-GB', {minimumFractionDigits:2})}</span></div>
+<div class="flex justify-between"><span class="text-rose-400">Naliczenia:</span><span>£${catCouncil.expense.toLocaleString('en-GB', {minimumFractionDigits:2})}</span></div>
+<div class="flex justify-between text-xs text-purple-300/50 pt-2 border-t border-white/10"><span>Liczba wpisów:</span><span>${catCouncil.count}</span></div>
+</div>
+</div>
+
+<!-- Pobrane z wypłaty -->
+<div class="backdrop-blur-xl bg-white/5 rounded-2xl p-6 border border-white/10 hover:border-white/20 transition-all">
+<div class="flex items-center justify-between mb-4">
+<div class="text-3xl">💰</div>
+<span class="text-xs font-bold px-2 py-1 rounded-full ${catPayroll.balance >= 0 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}">
+${catPayroll.balance >= 0 ? 'DODATNI' : 'UJEMNY'}
+</span>
+</div>
+<h3 class="text-lg font-bold text-white mb-3">Pobrane z wypłaty</h3>
+<div class="space-y-2 text-sm">
+<div class="flex justify-between"><span class="text-purple-300/70">Bilans:</span><span class="font-bold ${catPayroll.balance >= 0 ? 'text-emerald-400' : 'text-rose-400'}">£${Math.abs(catPayroll.balance).toLocaleString('en-GB', {minimumFractionDigits:2})}</span></div>
+<div class="flex justify-between"><span class="text-emerald-400">Wpłaty:</span><span>£${catPayroll.income.toLocaleString('en-GB', {minimumFractionDigits:2})}</span></div>
+<div class="flex justify-between"><span class="text-rose-400">Naliczenia:</span><span>£${catPayroll.expense.toLocaleString('en-GB', {minimumFractionDigits:2})}</span></div>
+<div class="flex justify-between text-xs text-purple-300/50 pt-2 border-t border-white/10"><span>Liczba wpisów:</span><span>${catPayroll.count}</span></div>
+</div>
+</div>
+</div>
+</div>
+
+<!-- Wykresy -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+<div class="backdrop-blur-xl bg-white/5 rounded-3xl p-6 border border-white/10">
+<h3 class="text-lg font-semibold mb-4">📊 Wpłaty vs Naliczenia (kategorie)</h3>
+<canvas id="categoryChart" style="max-height: 280px;"></canvas>
+</div>
+<div class="backdrop-blur-xl bg-white/5 rounded-3xl p-6 border border-white/10">
+<h3 class="text-lg font-semibold mb-4">📊 Rozkład wpłat według kategorii</h3>
+<canvas id="incomeChart" style="max-height: 280px;"></canvas>
+</div>
+</div>
+
+<div class="mb-8">
+<div class="backdrop-blur-xl bg-white/5 rounded-3xl p-6 border border-white/10">
+<h3 class="text-lg font-semibold mb-4">📊 Wpłaty ogółem vs Naliczenia ogółem</h3>
+<canvas id="expenseChart" style="max-height: 250px;"></canvas>
+</div>
+</div>
+
+<!-- Formularz -->
+<div class="relative mb-8">
+<div class="absolute inset-0 bg-gradient-to-r from-purple-500/10 to-blue-500/10 rounded-3xl blur-xl"></div>
+<div class="relative backdrop-blur-xl bg-white/5 rounded-3xl p-8 border border-white/10">
+<h2 class="text-xl font-bold mb-6">✨ Nowa transakcja</h2>
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+<div><label class="text-xs text-purple-300/80">📅 Data</label><input type="date" id="formDate" value="${state.formData.date}" class="w-full bg-white/10 border border-white/10 rounded-xl p-3 text-white"></div>
+<div><label class="text-xs text-purple-300/80">📂 Kategoria</label>
+<select id="formCategory" class="w-full bg-white/10 border border-white/10 rounded-xl p-3 text-white">
+<option value="medway" ${state.formData.category==='medway'?'selected':''}>🏛️ Medway Council</option>
+<option value="council" ${state.formData.category==='council'?'selected':''}>👥 Płatność Council</option>
+<option value="payroll" ${state.formData.category==='payroll'?'selected':''}>💰 Pobrane z wypłaty</option>
+</select>
+</div>
+<div><label class="text-xs text-purple-300/80">🔄 Typ</label>
+<select id="formType" class="w-full bg-white/10 border border-white/10 rounded-xl p-3 text-white">
+<option value="wplata" ${state.formData.type==='wplata'?'selected':''}>📈 Wpłata (+)</option>
+<option value="naliczenie" ${state.formData.type==='naliczenie'?'selected':''}>📉 Naliczenie (-)</option>
+</select>
+</div>
+<div><label class="text-xs text-purple-300/80">💷 Kwota (£)</label><input type="number" step="0.01" id="formAmount" placeholder="0.00" value="${state.formData.amount}" class="w-full bg-white/10 border border-white/10 rounded-xl p-3 text-white"></div>
+</div>
+<div class="flex flex-wrap items-center justify-between gap-4 mt-8">
+<div class="flex flex-wrap gap-4">
+<label class="flex items-center cursor-pointer"><input type="checkbox" id="formCyclic" ${state.formData.isCyclic?'checked':''} class="accent-purple-500 w-5 h-5"> <span class="ml-3 text-sm">🔄 Powtarzaj co miesiąc</span></label>
+<button onclick="exportToCSV()" class="bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 px-5 py-2 rounded-2xl text-sm font-medium">📎 Eksport CSV</button>
+<button onclick="resetAllData()" class="bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 px-5 py-2 rounded-2xl text-sm font-medium">🗑️ Resetuj dane</button>
+</div>
+<button id="addBtn" class="bg-gradient-to-r from-purple-500 to-blue-500 hover:scale-105 active:scale-95 px-10 py-3 rounded-2xl font-bold shadow-lg transition-all">✨ Dodaj wpis</button>
+</div>
+</div>
+</div>
+
+<!-- Tabela -->
+<div class="relative">
+<div class="relative backdrop-blur-xl bg-white/5 rounded-3xl border border-white/10 overflow-hidden">
+<div class="px-8 py-5 border-b border-white/10 bg-white/5 flex justify-between items-center flex-wrap gap-4">
+<h3 class="font-bold uppercase tracking-wider text-purple-300/80">📋 Historia transakcji</h3>
+<span class="text-xs px-4 py-1 rounded-full border border-purple-500/30 bg-purple-500/10">${state.currentYearFilter === 'all' ? 'Wszystkie lata' : `Rok ${state.currentYearFilter}`}</span>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full">
+<thead>
+<tr class="bg-white/5 text-purple-300/60 text-xs uppercase">
+<th class="px-8 py-4 text-left">Data</th>
+<th class="px-4 py-4 text-left">Kategoria</th>
+<th class="px-4 py-4 text-left">Typ</th>
+<th class="px-4 py-4 text-right">Kwota</th>
+<th class="px-8 py-4 text-right">Akcje</th>
+</table>
+</thead>
+<tbody class="divide-y divide-white/10">
+`;
+
+if (filteredEntries.length === 0) {
+html += `<tr><td colspan="5" class="p-20 text-center text-purple-300/40 italic">✨ Brak danych. Dodaj pierwszą transakcję!</td></tr>`;
+} else {
+filteredEntries.forEach(entry => {
+html += `
+<tr class="hover:bg-white/5 transition ${entry.isVirtual ? 'opacity-60' : ''}">
+<td class="px-8 py-4 font-mono text-sm">${entry.date} ${entry.isVirtual ? '<span class="ml-2 text-[10px] bg-purple-500/20 px-2 py-px rounded-full">AUTO</span>' : ''}</td>
+<td class="px-4 py-4 text-sm">${entry.category === 'medway' ? '🏛️ Medway Council' : entry.category === 'council' ? '👥 Płatność Council' : '💰 Pobrane z wypłaty'}</td>
+<td class="px-4 py-4 text-sm"><span class="${entry.type==='wplata' ? 'text-emerald-400' : 'text-rose-400'} font-medium">${entry.type==='wplata' ? '📈 Wpłata' : '📉 Naliczenie'}${entry.isCyclic && !entry.isVirtual ? ' 🔄' : ''}</span></td>
+<td class="px-4 py-4 text-right font-bold ${entry.type==='wplata' ? 'text-emerald-400' : 'text-rose-400'}">${entry.type==='wplata' ? '+' : '-'} £${entry.amount.toLocaleString('en-GB',{minimumFractionDigits:2})}</td>
+<td class="px-8 py-4 text-right">${!entry.isVirtual ? `<button onclick="startEdit('${entry.id}')" class="text-blue-400 hover:text-blue-500 mr-4 transition text-sm">✏️ Edytuj</button><button onclick="removeEntry('${entry.id}', false)" class="text-rose-400 hover:text-rose-500 transition text-sm">🗑️ Usuń</button>` : ''}</td>
+</tr>
+`;
+});
+}
+
+html += `
+</tbody>
+</table>
+</div>
+</div>
+</div>
+
+<footer class="mt-12 text-center text-purple-300/30 text-[10px] pb-8">
+💾 Dane zapisywane lokalnie | ${state.entries.filter(e => !e.isVirtual).length} wpisów źródłowych | ${state.entries.filter(e => e.isVirtual).length} automatycznych
+</footer>
+`;
+
+appDiv.innerHTML = html;
+
+// Podpięcie eventów formularza
+document.getElementById('formDate')?.addEventListener('change', (e) => state.formData.date = e.target.value);
+document.getElementById('formCategory')?.addEventListener('change', (e) => state.formData.category = e.target.value);
+document.getElementById('formType')?.addEventListener('change', (e) => state.formData.type = e.target.value);
+document.getElementById('formAmount')?.addEventListener('input', (e) => state.formData.amount = e.target.value);
+document.getElementById('formCyclic')?.addEventListener('change', (e) => state.formData.isCyclic = e.target.checked);
+document.getElementById('addBtn')?.addEventListener('click', () => window.addEntry());
+
+// Tworzenie wykresów
+setTimeout(() => {
+// Usuń stare wykresy
+if (chart1) chart1.destroy();
+if (chart2) chart2.destroy();
+if (chart3) chart3.destroy();
+
+// Wykres 1: Wpłaty vs Naliczenia dla kategorii
+const ctx1 = document.getElementById('categoryChart');
+if (ctx1) {
+chart1 = new Chart(ctx1, {
+type: 'bar',
+data: {
+labels: ['Medway Council', 'Płatność Council', 'Pobrane z wypłaty'],
+datasets: [
+{ label: 'Wpłaty (+)', data: [catMedway.income, catCouncil.income, catPayroll.income], backgroundColor: '#10b981', borderRadius: 8 },
+{ label: 'Naliczenia (-)', data: [catMedway.expense, catCouncil.expense, catPayroll.expense], backgroundColor: '#ef4444', borderRadius: 8 }
+]
+},
+options: { responsive: true, maintainAspectRatio: true, scales: { y: { beginAtZero: true, grid: { color: '#334155' }, ticks: { color: '#e2e8f0' } }, x: { ticks: { color: '#e2e8f0' } } }, plugins: { legend: { position: 'top', labels: { color: '#e2e8f0' } } } }
+});
+}
+
+// Wykres 2: Rozkład wpłat
+const ctx2 = document.getElementById('incomeChart');
+if (ctx2) {
+chart2 = new Chart(ctx2, {
+type: 'pie',
+data: { labels: ['Medway Council', 'Płatność Council', 'Pobrane z wypłaty'], datasets: [{ data: [catMedway.income, catCouncil.income, catPayroll.income], backgroundColor: ['#3b82f6', '#10b981', '#8b5cf6'] }] },
+options: { responsive: true, maintainAspectRatio: true, plugins: { legend: { position: 'bottom', labels: { color: '#e2e8f0' } } } }
+});
+}
+
+// Wykres 3: Ogółem
+const ctx3 = document.getElementById('expenseChart');
+if (ctx3) {
+chart3 = new Chart(ctx3, {
+type: 'bar',
+data: { labels: ['Wpłaty', 'Naliczenia'], datasets: [{ label: 'Kwota (£)', data: [totalIncome, totalExpense], backgroundColor: ['#10b981', '#ef4444'], borderRadius: 8 }] },
+options: { responsive: true, maintainAspectRatio: true, scales: { y: { beginAtZero: true, grid: { color: '#334155' }, ticks: { color: '#e2e8f0' } }, x: { ticks: { color: '#e2e8f0' } } }, plugins: { legend: { display: false } } }
+});
+}
+}, 50);
+}
+
+// Start
+loadFromLocalStorage();
+renderApp();
+</script>
+</body>
+</html>
